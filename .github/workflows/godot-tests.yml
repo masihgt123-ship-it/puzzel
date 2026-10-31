@@ -21,11 +21,10 @@ jobs:
       - name: Check out project
         uses: actions/checkout@v4
 
-      - name: Find project and create Android preset
+      - name: Find the Godot project
         shell: bash
         run: |
           set -euo pipefail
-
           python3 - <<'PY'
           from pathlib import Path
           import os
@@ -37,18 +36,19 @@ jobs:
 
           if len(projects) != 1:
               raise SystemExit(
-                  f'Expected exactly one extracted Godot project; found {len(projects)}.'
+                  f'Expected exactly one extracted Godot project; found {len(projects)}. '
+                  'Upload the project files, not just a ZIP.'
               )
 
           root = projects[0].parent.resolve()
-          preset_path = root / 'export_presets.cfg'
 
-          if not preset_path.is_file():
+          if not (root / 'export_presets.cfg').is_file():
               preset = '''[preset.0]
           name="Android"
           platform="Android"
           runnable=true
           export_filter="all_resources"
+          include_filter=""
           exclude_filter="tests/*,README*,LICENSE-NOTICE.md,.github/*"
           export_path="builds/maze-debug.apk"
           script_export_mode=2
@@ -70,8 +70,10 @@ jobs:
           keystore/debug_password="android"
           permissions/internet=false
           '''
-              preset_path.write_text(preset, encoding='utf-8')
-              print('Created Android export preset')
+              (root / 'export_presets.cfg').write_text(
+                  preset, encoding='utf-8'
+              )
+              print('Created missing Android export preset')
 
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write(f'PROJECT_DIR={root}\n')
@@ -94,13 +96,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Download Godot and Android export templates
+      - name: Download Godot and export templates
         shell: bash
         run: |
           set -euo pipefail
@@ -121,7 +122,6 @@ jobs:
             "$RUNNER_TEMP/godot-bin/godot"
 
           chmod +x "$RUNNER_TEMP/godot-bin/godot"
-
           echo "$RUNNER_TEMP/godot-bin" >> "$GITHUB_PATH"
 
           curl --fail --location --retry 3 \
@@ -129,7 +129,6 @@ jobs:
             -o "$RUNNER_TEMP/templates.tpz"
 
           TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
-
           mkdir -p "$TEMPLATE_DIR"
 
           unzip -j -q "$RUNNER_TEMP/templates.tpz" \
@@ -139,7 +138,7 @@ jobs:
 
           rm "$RUNNER_TEMP/templates.tpz"
 
-      - name: Configure Android SDK and debug signing
+      - name: Configure SDK and temporary debug signing
         shell: bash
         run: |
           set -euo pipefail
@@ -171,7 +170,6 @@ jobs:
               raise SystemExit('Android SDK path is missing')
 
           java = os.environ['JAVA_HOME']
-
           settings = Path(os.environ['XDG_CONFIG_HOME']) / 'godot'
           settings.mkdir(parents=True, exist_ok=True)
 
@@ -210,23 +208,64 @@ jobs:
           )
           PY
 
-      - name: Import resources
+      - name: Fix Android export configuration
         shell: bash
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
 
-          godot --headless --editor \
-            --path "$PROJECT_DIR" \
-            --import
+          root = Path(os.environ['PROJECT_DIR'])
+
+          preset = root / 'export_presets.cfg'
+          text = preset.read_text(encoding='utf-8')
+
+          if not re.search(r'^include_filter\s*=', text, re.M):
+              text = text.replace(
+                  '[preset.0]',
+                  '[preset.0]\ninclude_filter=""',
+                  1
+              )
+
+          preset.write_text(text, encoding='utf-8')
+
+          project = root / 'project.godot'
+          text = project.read_text(encoding='utf-8')
+
+          key = 'textures/vram_compression/import_etc2_astc'
+          pattern = r'^' + re.escape(key) + r'\s*=.*$'
+
+          if re.search(pattern, text, re.M):
+              text = re.sub(
+                  pattern,
+                  key + '=true',
+                  text,
+                  flags=re.M
+              )
+          elif '[rendering]' in text:
+              text = text.replace(
+                  '[rendering]',
+                  '[rendering]\n' + key + '=true',
+                  1
+              )
+          else:
+              text += '\n[rendering]\n' + key + '=true\n'
+
+          project.write_text(text, encoding='utf-8')
+
+          print(
+              'Enabled Android texture imports '
+              'and completed export preset'
+          )
+          PY
+
+      - name: Import resources
+        run: godot --headless --editor --path "$PROJECT_DIR" --import
 
       - name: Test all 50 stages
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          godot --headless \
-            --path "$PROJECT_DIR" \
-            --script res://tests/verify.gd
+        run: godot --headless --path "$PROJECT_DIR" --script res://tests/verify.gd
 
       - name: Build and verify debug APK
         shell: bash
@@ -244,7 +283,8 @@ jobs:
 
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
 
-          "$SDK/build-tools/35.0.0/apksigner" verify --verbose \
+          "$SDK/build-tools/35.0.0/apksigner" verify \
+            --verbose \
             "$PROJECT_DIR/builds/maze-debug.apk"
 
           (

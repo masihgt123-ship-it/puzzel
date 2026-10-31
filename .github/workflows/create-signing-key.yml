@@ -1,0 +1,101 @@
+name: Create Signing Key Once
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  create-key:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check password
+        shell: bash
+        env:
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::ANDROID_KEYSTORE_PASSWORD is missing"
+            exit 1
+          fi
+
+          if [ "${#KEY_PASSWORD}" -lt 16 ]; then
+            echo "::error::Use a strong password of at least 16 characters"
+            exit 1
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Generate and encrypt signing key
+        shell: bash
+        env:
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          PRIVATE_DIR="$RUNNER_TEMP/private-signing"
+          OUTPUT_DIR="$RUNNER_TEMP/encrypted-signing"
+
+          mkdir -p "$PRIVATE_DIR" "$OUTPUT_DIR"
+
+          keytool -genkeypair \
+            -keystore "$PRIVATE_DIR/maze-release.jks" \
+            -storetype JKS \
+            -alias maze \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Maze Music" \
+            -storepass:env KEY_PASSWORD \
+            -keypass:env KEY_PASSWORD \
+            -noprompt
+
+          openssl enc \
+            -aes-256-cbc \
+            -salt \
+            -pbkdf2 \
+            -iter 200000 \
+            -a -A \
+            -pass env:KEY_PASSWORD \
+            -in "$PRIVATE_DIR/maze-release.jks" \
+            -out "$OUTPUT_DIR/maze-key-encrypted.txt"
+
+          openssl enc -d \
+            -aes-256-cbc \
+            -pbkdf2 \
+            -iter 200000 \
+            -a -A \
+            -pass env:KEY_PASSWORD \
+            -in "$OUTPUT_DIR/maze-key-encrypted.txt" \
+            -out "$PRIVATE_DIR/verified.jks"
+
+          cmp \
+            "$PRIVATE_DIR/maze-release.jks" \
+            "$PRIVATE_DIR/verified.jks"
+
+          echo "Signing key generated and encryption checked."
+
+      - name: Downloadable encrypted key
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-signing-key-backup
+          path: ${{ runner.temp }}/encrypted-signing/maze-key-encrypted.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Clean up
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/private-signing"
+          rm -rf "$RUNNER_TEMP/encrypted-signing"

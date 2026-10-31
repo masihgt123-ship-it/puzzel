@@ -25,6 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           python3 - <<'PY'
           from pathlib import Path
           import os
@@ -33,6 +34,7 @@ jobs:
               p for p in Path('.').rglob('project.godot')
               if '.godot' not in p.parts and '.git' not in p.parts
           ]
+
           if len(projects) != 1:
               raise SystemExit(
                   f'Expected exactly one extracted Godot project; found {len(projects)}.'
@@ -73,6 +75,7 @@ jobs:
 
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write(f'PROJECT_DIR={root}\n')
+
           print(f'Project: {root}')
           PY
 
@@ -84,12 +87,18 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
       - name: Install Android build tools
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Download Godot and Android export templates
         shell: bash
@@ -103,13 +112,16 @@ jobs:
             -o "$RUNNER_TEMP/godot.zip"
 
           mkdir -p "$RUNNER_TEMP/godot-bin"
-          unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot-bin"
+
+          unzip -q "$RUNNER_TEMP/godot.zip" \
+            -d "$RUNNER_TEMP/godot-bin"
 
           mv \
             "$RUNNER_TEMP/godot-bin/Godot_v${GODOT_VERSION}-stable_linux.x86_64" \
             "$RUNNER_TEMP/godot-bin/godot"
 
           chmod +x "$RUNNER_TEMP/godot-bin/godot"
+
           echo "$RUNNER_TEMP/godot-bin" >> "$GITHUB_PATH"
 
           curl --fail --location --retry 3 \
@@ -117,6 +129,7 @@ jobs:
             -o "$RUNNER_TEMP/templates.tpz"
 
           TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
           mkdir -p "$TEMPLATE_DIR"
 
           unzip -j -q "$RUNNER_TEMP/templates.tpz" \
@@ -149,18 +162,26 @@ jobs:
           import os
           from pathlib import Path
 
-          sdk = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          sdk = (
+              os.environ.get('ANDROID_HOME')
+              or os.environ.get('ANDROID_SDK_ROOT')
+          )
+
           if not sdk:
               raise SystemExit('Android SDK path is missing')
 
           java = os.environ['JAVA_HOME']
+
           settings = Path(os.environ['XDG_CONFIG_HOME']) / 'godot'
           settings.mkdir(parents=True, exist_ok=True)
 
           (settings / 'editor_settings-4.4.tres').write_text(
-              '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n'
-              'export/android/android_sdk_path = ' + json.dumps(sdk) + '\n'
-              'export/android/java_sdk_path = ' + json.dumps(java) + '\n',
+              '[gd_resource type="EditorSettings" format=3]\n\n'
+              '[resource]\n'
+              'export/android/android_sdk_path = '
+              + json.dumps(sdk) + '\n'
+              'export/android/java_sdk_path = '
+              + json.dumps(java) + '\n',
               encoding='utf-8'
           )
 
@@ -170,23 +191,42 @@ jobs:
 
           if key not in text:
               raise SystemExit(
-                  'Expected the supplied Android preset with an empty debug keystore path'
+                  'Expected the supplied Android preset '
+                  'with an empty debug keystore path'
               )
 
           keystore = str(
-              Path(os.environ['RUNNER_TEMP']) / 'android-signing/debug.keystore'
+              Path(os.environ['RUNNER_TEMP'])
+              / 'android-signing/debug.keystore'
           )
+
           preset.write_text(
-              text.replace(key, 'keystore/debug=' + json.dumps(keystore), 1),
+              text.replace(
+                  key,
+                  'keystore/debug=' + json.dumps(keystore),
+                  1
+              ),
               encoding='utf-8'
           )
           PY
 
       - name: Import resources
-        run: godot --headless --editor --path "$PROJECT_DIR" --import
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          godot --headless --editor \
+            --path "$PROJECT_DIR" \
+            --import
 
       - name: Test all 50 stages
-        run: godot --headless --path "$PROJECT_DIR" --script res://tests/verify.gd
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          godot --headless \
+            --path "$PROJECT_DIR" \
+            --script res://tests/verify.gd
 
       - name: Build and verify debug APK
         shell: bash
@@ -195,13 +235,15 @@ jobs:
 
           mkdir -p "$PROJECT_DIR/builds"
 
-          godot --headless --path "$PROJECT_DIR" \
+          godot --headless \
+            --path "$PROJECT_DIR" \
             --export-debug "Android" \
             "$PROJECT_DIR/builds/maze-debug.apk"
 
           test -s "$PROJECT_DIR/builds/maze-debug.apk"
 
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+
           "$SDK/build-tools/35.0.0/apksigner" verify --verbose \
             "$PROJECT_DIR/builds/maze-debug.apk"
 

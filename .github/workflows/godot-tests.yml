@@ -25,16 +25,25 @@ jobs:
         with:
           packages: platform-tools build-tools;34.0.0 platforms;android-34
 
-      - name: Setup Godot Engine
-        uses: abarrak/godot-action@v2
-        with:
-          version: 4.4.1
-          use-templates: true
+      - name: Download and Setup Godot Engine
+        run: |
+          GODOT_VERSION="4.4.1"
+          wget https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
+          unzip Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip
+          mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 /usr/local/bin/godot
+          
+          # دانلود و نصب تمپلیت‌های اکسپورت اندروید
+          wget https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          unzip Godot_v${GODOT_VERSION}-stable_export_templates.tpz
+          mv templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
 
       - name: Export Godot Android APK
         run: |
           mkdir -p build/android
-          godot --headless --export-debug "Android" build/android/puzzel.apk
+          # مسیر پوشه پروژه‌ات را اگر داخل ساب‌فولدر است (مثل maze-music) اینجا تنظیم کن
+          cd maze-music || true 
+          godot --headless --export-debug "Android" ../build/android/puzzel.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

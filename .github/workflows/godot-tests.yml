@@ -1,4 +1,4 @@
-name: Build Android Debug APK
+name: Build Signed Android APK
 
 on:
   push:
@@ -14,94 +14,73 @@ jobs:
     timeout-minutes: 30
 
     env:
-      GODOT_VERSION: 4.4.1
+      GODOT_VERSION: "4.4.1"
+      PROJECT_DIR: ${{ github.workspace }}/maze-music
       XDG_CONFIG_HOME: /home/runner/.config
 
     steps:
       - name: Check out project
         uses: actions/checkout@v4
 
-      - name: Find the Godot project
+      - name: Copy app icon into Godot project
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
 
-          projects = [
-              p for p in Path('.').rglob('project.godot')
-              if '.godot' not in p.parts and '.git' not in p.parts
-          ]
+          test -f "$GITHUB_WORKSPACE/icon-192.png"
+          test -d "$PROJECT_DIR"
 
-          if len(projects) != 1:
-              raise SystemExit(
-                  f'Expected exactly one extracted Godot project; found {len(projects)}. '
-                  'Upload the project files, not just a ZIP.'
-              )
+          cp "$GITHUB_WORKSPACE/icon-192.png" \
+            "$PROJECT_DIR/icon-192.png"
 
-          root = projects[0].parent.resolve()
+      - name: Check required project files
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          if not (root / 'export_presets.cfg').is_file():
-              preset = '''[preset.0]
-          name="Android"
-          platform="Android"
-          runnable=true
-          export_filter="all_resources"
-          include_filter=""
-          exclude_filter="tests/*,README*,LICENSE-NOTICE.md,.github/*"
-          export_path="builds/maze-debug.apk"
-          script_export_mode=2
+          test -f "$PROJECT_DIR/project.godot"
+          test -f "$PROJECT_DIR/export_presets.cfg"
+          test -f "$PROJECT_DIR/icon-192.png"
+          test -f "$PROJECT_DIR/tests/verify.gd"
 
-          [preset.0.options]
-          gradle_build/use_gradle_build=false
-          gradle_build/export_format=0
-          architectures/armeabi-v7a=true
-          architectures/arm64-v8a=true
-          architectures/x86=false
-          architectures/x86_64=false
-          version/code=1
-          version/name="1.0"
-          package/unique_name="org.mazemusic.game"
-          package/name="Maze Music"
-          package/signed=true
-          keystore/debug=""
-          keystore/debug_user="androiddebugkey"
-          keystore/debug_password="android"
-          permissions/internet=false
-          '''
-              (root / 'export_presets.cfg').write_text(
-                  preset, encoding='utf-8'
-              )
-              print('Created missing Android export preset')
+      - name: Check signing secrets
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
 
-          with open(os.environ['GITHUB_ENV'], 'a') as f:
-              f.write(f'PROJECT_DIR={root}\n')
-
-          print(f'Project: {root}')
-          PY
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing signing secret: $name"
+              exit 1
+            fi
+          done
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools'
+          packages: "platform-tools"
 
       - name: Install Android build tools
         shell: bash
         run: |
           set -euo pipefail
+
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Download Godot and export templates
+      - name: Download Godot and Android templates
         shell: bash
         run: |
           set -euo pipefail
@@ -122,6 +101,7 @@ jobs:
             "$RUNNER_TEMP/godot-bin/godot"
 
           chmod +x "$RUNNER_TEMP/godot-bin/godot"
+
           echo "$RUNNER_TEMP/godot-bin" >> "$GITHUB_PATH"
 
           curl --fail --location --retry 3 \
@@ -129,145 +109,198 @@ jobs:
             -o "$RUNNER_TEMP/templates.tpz"
 
           TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
           mkdir -p "$TEMPLATE_DIR"
 
           unzip -j -q "$RUNNER_TEMP/templates.tpz" \
-            'templates/android_debug.apk' \
-            'templates/android_release.apk' \
+            "templates/android_debug.apk" \
+            "templates/android_release.apk" \
             -d "$TEMPLATE_DIR"
 
           rm "$RUNNER_TEMP/templates.tpz"
 
-      - name: Configure SDK and temporary debug signing
+      - name: Restore private signing key
         shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
+          umask 077
 
           mkdir -p "$RUNNER_TEMP/android-signing"
 
-          keytool -genkeypair -noprompt \
-            -keystore "$RUNNER_TEMP/android-signing/debug.keystore" \
-            -storetype JKS \
-            -storepass android \
-            -keypass android \
-            -alias androiddebugkey \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          encoded = ''.join(
+              os.environ['KEYSTORE_BASE64'].split()
+          )
+
+          target = (
+              Path(os.environ['RUNNER_TEMP'])
+              / 'android-signing/maze-release.jks'
+          )
+
+          target.write_bytes(
+              base64.b64decode(encoded, validate=True)
+          )
+          target.chmod(0o600)
+          PY
+
+      - name: Configure Godot, icon and release signing
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          umask 077
 
           python3 - <<'PY'
           import json
           import os
+          import re
           from pathlib import Path
+
+          def set_option(text, section, key, value):
+              header = '[' + section + ']'
+              lines = text.splitlines()
+              start = next(
+                  (i for i, line in enumerate(lines)
+                   if line.strip() == header),
+                  None
+              )
+
+              if start is None:
+                  if lines and lines[-1].strip():
+                      lines.append('')
+                  lines.extend([header, key + '=' + value])
+                  return '\n'.join(lines) + '\n'
+
+              end = next(
+                  (i for i in range(start + 1, len(lines))
+                   if lines[i].strip().startswith('[')),
+                  len(lines)
+              )
+
+              pattern = re.compile(
+                  r'^\s*' + re.escape(key) + r'\s*='
+              )
+
+              matches = [
+                  i for i in range(start + 1, end)
+                  if pattern.match(lines[i])
+              ]
+
+              if matches:
+                  lines[matches[0]] = key + '=' + value
+                  for i in reversed(matches[1:]):
+                      del lines[i]
+              else:
+                  lines.insert(end, key + '=' + value)
+
+              return '\n'.join(lines) + '\n'
 
           sdk = (
               os.environ.get('ANDROID_HOME')
               or os.environ.get('ANDROID_SDK_ROOT')
           )
-
           if not sdk:
               raise SystemExit('Android SDK path is missing')
 
-          java = os.environ['JAVA_HOME']
-          settings = Path(os.environ['XDG_CONFIG_HOME']) / 'godot'
-          settings.mkdir(parents=True, exist_ok=True)
+          settings_dir = (
+              Path(os.environ['XDG_CONFIG_HOME']) / 'godot'
+          )
+          settings_dir.mkdir(parents=True, exist_ok=True)
 
-          (settings / 'editor_settings-4.4.tres').write_text(
+          settings = (
               '[gd_resource type="EditorSettings" format=3]\n\n'
               '[resource]\n'
               'export/android/android_sdk_path = '
               + json.dumps(sdk) + '\n'
               'export/android/java_sdk_path = '
-              + json.dumps(java) + '\n',
-              encoding='utf-8'
+              + json.dumps(os.environ['JAVA_HOME']) + '\n'
           )
 
-          preset = Path(os.environ['PROJECT_DIR']) / 'export_presets.cfg'
-          text = preset.read_text(encoding='utf-8')
-          key = 'keystore/debug=""'
+          (settings_dir / 'editor_settings-4.4.tres').write_text(
+              settings, encoding='utf-8'
+          )
 
-          if key not in text:
-              raise SystemExit(
-                  'Expected the supplied Android preset '
-                  'with an empty debug keystore path'
-              )
+          project = Path(os.environ['PROJECT_DIR'])
+          project_file = project / 'project.godot'
+          text = project_file.read_text(encoding='utf-8')
+
+          text = set_option(
+              text, 'application', 'config/icon',
+              '"res://icon-192.png"'
+          )
+          text = set_option(
+              text, 'rendering',
+              'textures/vram_compression/import_etc2_astc',
+              'true'
+          )
+          project_file.write_text(text, encoding='utf-8')
+
+          preset = project / 'export_presets.cfg'
+          text = preset.read_text(encoding='utf-8')
+
+          text = set_option(
+              text, 'preset.0', 'include_filter', '""'
+          )
 
           keystore = str(
               Path(os.environ['RUNNER_TEMP'])
-              / 'android-signing/debug.keystore'
+              / 'android-signing/maze-release.jks'
           )
 
-          preset.write_text(
-              text.replace(
-                  key,
-                  'keystore/debug=' + json.dumps(keystore),
-                  1
+          values = {
+              'launcher_icons/main_192x192':
+                  '"res://icon-192.png"',
+              'package/signed': 'true',
+              'keystore/release': json.dumps(keystore),
+              'keystore/release_user': json.dumps(
+                  os.environ['KEY_ALIAS']
               ),
-              encoding='utf-8'
-          )
-          PY
+              'keystore/release_password': json.dumps(
+                  os.environ['KEYSTORE_PASSWORD']
+              ),
+              'version/code': str(
+                  int(os.environ['GITHUB_RUN_NUMBER'])
+              ),
+          }
 
-      - name: Fix Android export configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-          import re
-
-          root = Path(os.environ['PROJECT_DIR'])
-
-          preset = root / 'export_presets.cfg'
-          text = preset.read_text(encoding='utf-8')
-
-          if not re.search(r'^include_filter\s*=', text, re.M):
-              text = text.replace(
-                  '[preset.0]',
-                  '[preset.0]\ninclude_filter=""',
-                  1
+          for key, value in values.items():
+              text = set_option(
+                  text, 'preset.0.options', key, value
               )
 
           preset.write_text(text, encoding='utf-8')
+          preset.chmod(0o600)
 
-          project = root / 'project.godot'
-          text = project.read_text(encoding='utf-8')
-
-          key = 'textures/vram_compression/import_etc2_astc'
-          pattern = r'^' + re.escape(key) + r'\s*=.*$'
-
-          if re.search(pattern, text, re.M):
-              text = re.sub(
-                  pattern,
-                  key + '=true',
-                  text,
-                  flags=re.M
-              )
-          elif '[rendering]' in text:
-              text = text.replace(
-                  '[rendering]',
-                  '[rendering]\n' + key + '=true',
-                  1
-              )
-          else:
-              text += '\n[rendering]\n' + key + '=true\n'
-
-          project.write_text(text, encoding='utf-8')
-
-          print(
-              'Enabled Android texture imports '
-              'and completed export preset'
-          )
+          print('Icon and release signing configured')
           PY
 
       - name: Import resources
-        run: godot --headless --editor --path "$PROJECT_DIR" --import
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          godot --headless --editor \
+            --path "$PROJECT_DIR" \
+            --import
 
       - name: Test all 50 stages
-        run: godot --headless --path "$PROJECT_DIR" --script res://tests/verify.gd
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Build and verify debug APK
+          godot --headless \
+            --path "$PROJECT_DIR" \
+            --script res://tests/verify.gd
+
+      - name: Build signed release APK
         shell: bash
         run: |
           set -euo pipefail
@@ -276,29 +309,36 @@ jobs:
 
           godot --headless \
             --path "$PROJECT_DIR" \
-            --export-debug "Android" \
-            "$PROJECT_DIR/builds/maze-debug.apk"
+            --export-release "Android" \
+            "$PROJECT_DIR/builds/maze-release.apk"
 
-          test -s "$PROJECT_DIR/builds/maze-debug.apk"
+          test -s "$PROJECT_DIR/builds/maze-release.apk"
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          set -euo pipefail
 
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
 
           "$SDK/build-tools/35.0.0/apksigner" verify \
             --verbose \
-            "$PROJECT_DIR/builds/maze-debug.apk"
+            --print-certs \
+            "$PROJECT_DIR/builds/maze-release.apk"
 
           (
             cd "$PROJECT_DIR/builds"
-            sha256sum maze-debug.apk > maze-debug.apk.sha256
+            sha256sum maze-release.apk \
+              > maze-release.apk.sha256
           )
 
-      - name: Upload installable APK
+      - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: maze-debug-apk
+          name: maze-signed-apk
           path: |
-            ${{ env.PROJECT_DIR }}/builds/maze-debug.apk
-            ${{ env.PROJECT_DIR }}/builds/maze-debug.apk.sha256
+            ${{ env.PROJECT_DIR }}/builds/maze-release.apk
+            ${{ env.PROJECT_DIR }}/builds/maze-release.apk.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -307,5 +347,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-build-test-results
-          path: '${{ env.PROJECT_DIR }}/tests/results.json'
+          path: ${{ env.PROJECT_DIR }}/tests/results.json
           if-no-files-found: warn
+
+      - name: Remove private signing material
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/android-signing"
+
+          git -C "$GITHUB_WORKSPACE" restore \
+            -- maze-music/export_presets.cfg \
+               maze-music/project.godot

@@ -1,0 +1,13 @@
+track_01.mp3: Bogart VGM Stringsphere.mp3
+track_02.mp3: Brave Space Explorers.mp3
+track_03.mp3: CinematicTrailerMusic.mp3
+track_04.mp3: Easy Ride.mp3
+track_05.mp3: demon lord.mp3
+track_06.mp3: Героическая минорная.mp3
+track_07.mp3: awesomeness.wav
+track_08.mp3: Battle Theme 1.mp3
+track_09.mp3: Battle Theme 2.mp3
+track_10.mp3: Battle Theme 3.mp3
+track_11.mp3: Battle Theme 4.mp3
+track_12.mp3: Battle Theme 5.mp3
+Commercial licenses not verified.
